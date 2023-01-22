@@ -1,6 +1,10 @@
 use std::io::{stdout, Write};
 
 use crc::crc;
+use flate2::{
+    write::{DeflateEncoder, ZlibEncoder},
+    Compression,
+};
 mod crc;
 
 enum ChunkType {
@@ -50,10 +54,44 @@ impl ChunkType {
                 ]);
                 ret
             }
-            ChunkType::Idat { data } => data,
+            ChunkType::Idat { data } => {
+                let mut buf = Vec::with_capacity(data.len());
+                // zlib compression method and flags, original method was 7 but
+                // imagemagick uses 6
+                let cmf = 6 << 4 | 8;
+                // default compression algorithm = 2, no preset dictionary = 0.
+                // imagemagick uses compression algorithm 3 -> maximum
+                // compression
+                let mut flg = 3 << 6 | 0 << 5;
+                let v = cmf as u16 * 256 + flg;
+                let fcheck = 31 - v % 31;
+                flg |= fcheck;
+                eprintln!("{:x}", flg);
+                buf.extend([cmf as u8, flg as u8]);
+                let adler = adler32(&data);
+                let mut e =
+                    DeflateEncoder::new(Vec::new(), Compression::default());
+                e.write_all(&data).unwrap();
+                let compressed = e.finish().unwrap();
+                buf.extend(compressed);
+                eprintln!("{:02x?}", bytes(adler));
+                buf.extend(bytes(adler));
+                buf
+            }
             ChunkType::Iend => vec![],
         }
     }
+}
+
+fn adler32(bytes: &[u8]) -> u32 {
+    const ADLER: u32 = 65521;
+    let mut s1 = 1;
+    let mut s2 = 0;
+    for b in bytes {
+        s1 = (s1 + *b as u32) % ADLER;
+        s2 = (s2 + s1) % ADLER;
+    }
+    s2 * 65536 + s1
 }
 
 struct Png {
@@ -93,19 +131,28 @@ impl Png {
 }
 
 fn main() {
+    let w = 1920;
+    let h = 1080;
     let mut png = Png::new();
     png.write_chunk(ChunkType::Ihdr {
-        width: 400,
-        height: 308,
-        bit_depth: 1,
-        color_type: 0,
+        width: w,
+        height: h,
+        bit_depth: 8,
+        color_type: 2,
         compression_method: 0,
         filter_method: 0,
         interlace_method: 0,
     });
-    png.write_chunk(ChunkType::Idat {
-        data: vec![128; 400 * 308],
-    });
+    let mut data = Vec::new();
+    for _row in 0..h {
+        data.push(0);
+        for _col in 0..h {
+            data.push(3);
+            data.push(3);
+            data.push(3);
+        }
+    }
+    png.write_chunk(ChunkType::Idat { data });
     png.write_chunk(ChunkType::Iend);
     stdout().write_all(&png.bytes).unwrap();
 }
